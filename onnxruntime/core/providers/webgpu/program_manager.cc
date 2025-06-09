@@ -82,6 +82,19 @@ Status ProgramManager::Build(const ProgramBase& program,
   wgpu::ShaderModuleWGSLDescriptor wgsl_descriptor{};
   wgsl_descriptor.code = code.c_str();
 
+  if (program.Name().find("MatMulNBits") != std::string::npos) {
+    std::cout << program.Name() << "\n";
+    std::cout << "======" << "\n";
+    std::cout << code << "\n";
+    std::cout << "======" << "\n";
+  }
+  if (program.Name().find("FlashAttention") != std::string::npos) {
+    std::cout << program.Name() << "\n";
+    std::cout << "======" << "\n";
+    std::cout << code << "\n";
+    std::cout << "======" << "\n";
+  }
+
   wgpu::ShaderModuleDescriptor descriptor{};
   descriptor.nextInChain = &wgsl_descriptor;
 

@@ -333,7 +333,7 @@ Status DP4AMatMulNBitsSmallMProgram::GenerateShaderCode(ShaderHelper& shader) co
   // 1. Each workgroup handles tile_size_k_vec (16) * k_vectorization_in_b (32) columns (total 512) and num_concurrent_b_rows of matrix B at a time,
   // iterating over the columns to compute a partial dot product.
   // 2. Uses vec4 vectorization where each K represents 32 elements of matrix B
-  constexpr uint32_t tile_size_k_vec = 16;
+  constexpr uint32_t tile_size_k_vec = 64;
 
   // 1. Workgroup Responsibility:
   //    - Processes one row of matrix A
@@ -467,7 +467,7 @@ Status ApplyDP4AMatrixMatMulNBits(const Tensor* a, const Tensor* b, const Tensor
   ORT_RETURN_IF_ERROR(context.RunProgram(quantize_program));
 
   if (M < min_M_for_tile_optimization) {
-    constexpr uint32_t kTileSize = 32;
+    constexpr uint32_t kTileSize = 2;
     DP4AMatMulNBitsSmallMProgram mul_program{kTileSize, nbits};
     uint32_t num_N_tile = (N + kTileSize - 1) / kTileSize;
     mul_program.SetWorkgroupSize(128);

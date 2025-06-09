@@ -470,6 +470,7 @@ Status ApplyDP4AMatrixMatMulNBits(const Tensor* a, const Tensor* b, const Tensor
     uint32_t tile_size_k_vec = 16;
     uint32_t tile_size = 32;
 
+#if 1
     std::string architecture(context.AdapterInfo().architecture.data, context.AdapterInfo().architecture.length);
     // std::cout << "architecture " << architecture << std::endl;
     if (architecture == "gen-12lp") {
@@ -479,8 +480,9 @@ Status ApplyDP4AMatrixMatMulNBits(const Tensor* a, const Tensor* b, const Tensor
     } else if (architecture == "xe-2lpg") {
       // std::cout << "optimize for lnl\n";
       tile_size_k_vec = 32;
-      tile_size = 8;
+      tile_size = 4;
     }
+#endif
 
     DP4AMatMulNBitsSmallMProgram mul_program{tile_size_k_vec, tile_size, nbits};
     uint32_t num_N_tile = (N + tile_size - 1) / tile_size;

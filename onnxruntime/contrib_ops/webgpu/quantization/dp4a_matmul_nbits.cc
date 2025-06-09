@@ -350,14 +350,15 @@ Status DP4AMatMulNBitsSmallMProgram::GenerateShaderCode(ShaderHelper& shader) co
                                     << "  const double_tile_size_k_vec = " << 2 * tile_size_k_vec << "u;\n"
                                     // sub_tile_count is the number of concurrent b rows processed by the workgroup.
                                     << "  const sub_tile_count = " << WorkgroupSizeX() / tile_size_k_vec << "u;\n"
-                                    << "  var<workgroup> inter_results: array<array<output_element_t, tile_size_k_vec>, tile_size>;\n";
+                                    << "  const scale_a_size_k_vec = " << tile_size_k_vec / 4 << "u;\n";
 
   shader.AdditionalImplementation() << CommonFunctions(nbits_)
                                     << R"ADDNL_FN(
+    var<workgroup> inter_results: array<array<output_element_t, tile_size_k_vec>, tile_size>;
     // Need 2 * tile_size_k_vec (32) to store a tile_A since b is quantized as 4 bits and a is quantized as 8 bits.
-    var<workgroup> tile_A : array<vec4<u32>, 32>;
+    var<workgroup> tile_A : array<vec4<u32>, double_tile_size_k_vec>;
     // Need 4 scales value since each tile_A includes 512 (4x4x32) scalars and the block_size is 128.
-    var<workgroup> scale_A : array<output_element_t, 4>;
+    var<workgroup> scale_A : array<output_element_t, scale_a_size_k_vec>;
     fn loadSHMA(a_global: u32, kidx_v: u32, col: u32)
     {
       let k_offset = kidx_v + col;
@@ -366,7 +367,7 @@ Status DP4AMatMulNBitsSmallMProgram::GenerateShaderCode(ShaderHelper& shader) co
       }
 
       tile_A[col] = input_a[a_global*uniforms.K16+k_offset];
-      if (col < 4)
+      if (col < scale_a_size_k_vec)
       {
         // kidx_v - covers 16 values of k in input_a
         scale_A[col] = scales_a[a_global*(uniforms.K/128) + kidx_v/8 + col];
@@ -388,11 +389,10 @@ Status DP4AMatMulNBitsSmallMProgram::GenerateShaderCode(ShaderHelper& shader) co
         loadSHMA(a_global, kidx_v * 2, local_idx);
       }
       workgroupBarrier();
-      var own_a: vec4<u32> = tile_A[local_col * 2];
-      var own_a1: vec4<u32> = tile_A[local_col * 2 + 1];
-      var own_scale_a = scale_A[local_col / 4];
-      var own_b = vec4<u32>(0);
-      var own_b1 = vec4<u32>(0);
+      var local_a_offset = local_col * 2;
+      var own_a: vec4<u32> = tile_A[local_a_offset];
+      var own_a1: vec4<u32> = tile_A[local_a_offset + 1];
+      var own_scale_a = scale_A[local_a_offset / 8];
       let k_offset = kidx_v + local_col;
       // calculate intermediate results into inter_results.
       for (var row_offset = 0u; row_offset < tile_size; row_offset += sub_tile_count) {
@@ -404,13 +404,14 @@ Status DP4AMatMulNBitsSmallMProgram::GenerateShaderCode(ShaderHelper& shader) co
   if (nbits_ == 4) {
     shader.MainFunctionBody() << R"MAIN_FN(
           let b_value = input_b[b_offset];
-          own_b = DequantizedFrom4BitsTo8Bits(b_value.xy);
-          own_b1 = DequantizedFrom4BitsTo8Bits(b_value.zw);
+
+          let own_b = DequantizedFrom4BitsTo8Bits(b_value.xy);
+          let own_b1 = DequantizedFrom4BitsTo8Bits(b_value.zw);
   )MAIN_FN";
   } else {
     shader.MainFunctionBody() << R"MAIN_FN(
-          own_b = AlignWithZeroPoint(input_b[b_offset * 2]);
-          own_b1 = AlignWithZeroPoint(input_b[b_offset * 2 + 1]);
+          let own_b = AlignWithZeroPoint(input_b[b_offset * 2]);
+          let own_b1 = AlignWithZeroPoint(input_b[b_offset * 2 + 1]);
   )MAIN_FN";
   }
   shader.MainFunctionBody() << R"MAIN_FN(

@@ -6,6 +6,7 @@
 #param tile_n
 #param use_subgroup
 #param vec_size
+#param is_m_major
 
 #use .getByOffset .setByOffset
 
@@ -94,7 +95,13 @@ $MAIN {
   let m_global_base = ((workgroup_idx / uniforms.N_tiles) % uniforms.M_tiles) * TILE_M_SIZE;
   let n_global_base = (workgroup_idx % uniforms.N_tiles) * TILE_N_SIZE;
 
+#if is_m_major
+  // M-major: each of the 64 threads owns one row `m` and accumulates over the TILE_N columns.
+  var results : array<output_element_t, TILE_N_SIZE>;
+#else
+  // N-major: each of the 64 threads owns one column `n` and accumulates over the TILE_M rows.
   var results : array<output_element_t, TILE_M_SIZE>;
+#endif
   for (var k_idx = 0u; k_idx < uniforms.K_tiles; k_idx++) {
     for (var src_m = 0u; src_m < TILE_M_SIZE; src_m += ADVANCE_DIM) {
       // Loads a 64 vec of src into the workgroup memory.
@@ -117,6 +124,25 @@ $MAIN {
     workgroupBarrier();
 
     for (var inner_k_idx = 0u; inner_k_idx < TILE_K_VEC_SIZE; inner_k_idx++) {
+#if is_m_major
+      // Each thread owns one row `m` (== local_idx) and iterates over the TILE_N columns.
+      let src_data = src_tile[inner_k_idx][local_idx];
+#if use_subgroup
+      let weight_data = weight_tile[inner_k_idx][sg_id];
+      for (var n_idx = 0u; n_idx < TILE_N_SIZE; n_idx++) {
+        results[n_idx] += output_element_t(dot(subgroupShuffle(weight_data, n_idx), src_data));
+      }
+#else
+      for (var n_idx = 0u; n_idx < TILE_N_SIZE; n_idx++) {
+#if vec_size == 1
+        results[n_idx] += output_element_t(src_data * weight_tile[inner_k_idx][n_idx]);
+#else
+        results[n_idx] += output_element_t(dot(src_data, weight_tile[inner_k_idx][n_idx]));
+#endif
+      }
+#endif
+#else
+      // Each thread owns one column `n` (== local_idx) and iterates over the TILE_M rows.
       let weight_data = weight_tile[inner_k_idx][local_idx];
 #if use_subgroup
       let src_data = src_tile[inner_k_idx][sg_id];
@@ -132,16 +158,26 @@ $MAIN {
 #endif
       }
 #endif
+#endif
     }
     workgroupBarrier();
   }
 
-  let m_base = m_global_base;
+#if is_m_major
+  // Each thread wrote one row `m` (== m_global_base + local_idx); iterate its TILE_N columns.
+  let m_row = m_global_base + local_idx;
+  for (var n_idx = 0u; n_idx < TILE_N_SIZE; n_idx++) {
+    let n_col = n_global_base + n_idx;
+    let bias = load_bias(n_col);
+    var output_data = results[n_idx] + bias;
+    write_output(batch, m_row, n_col, output_data);
+  }
+#else
   let n_base = n_global_base + local_idx;
-
   let bias = load_bias(n_base);
   for (var m_idx = 0u; m_idx < TILE_M_SIZE; m_idx++) {
     var output_data = results[m_idx] + bias;
-    write_output(batch, m_base + m_idx, n_base, output_data);
+    write_output(batch, m_global_base + m_idx, n_base, output_data);
   }
+#endif
 }  // MAIN

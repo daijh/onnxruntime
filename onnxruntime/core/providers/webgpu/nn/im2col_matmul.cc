@@ -12,30 +12,49 @@
 namespace onnxruntime {
 namespace webgpu {
 namespace {
-// Chooses the optimal tile size (M, N) for the im2col operation.
-// This tile size is performance-tuned and varies depending on the target device.
-std::pair<uint32_t, uint32_t> ChooseTileSize(uint32_t im2col_m, uint32_t im2col_n) {
-  // Define a list of preferred (tile_m, tile_n) pairs in descending order of preference.
-  const std::vector<std::pair<uint32_t, uint32_t>> kTileSizes = {
-      std::make_pair(32, 64),
-      std::make_pair(16, 64),
-  };
+// Width of the major (workgroup/thread) tile dimension.
+constexpr uint32_t kMajorTile = 64u;
 
-  for (const auto& tile_pair : kTileSizes) {
-    const uint32_t tile_m = tile_pair.first;
-    const uint32_t tile_n = tile_pair.second;
+// Minimum number of dispatched workgroups (per batch) needed to keep the GPU
+// busy. Below this, prefer smaller register tiles to spawn more workgroups.
+constexpr uint32_t kMinDispatch = 128u;
 
-    const uint32_t dispatch_m = CeilDiv(im2col_m, tile_m);
-    const uint32_t dispatch_n = CeilDiv(im2col_n, tile_n);
-    const uint32_t dispatch = dispatch_m * dispatch_n;
+// Result of tile-size selection: the (M, N) tile shape and whether the kernel
+// runs in M-major or N-major orientation.
+struct Im2ColTileConfig {
+  uint32_t tile_m;
+  uint32_t tile_n;
+  bool is_m_major;
+};
 
-    if (dispatch >= 128) {
-      return tile_pair;
+// Chooses the optimal tile shape and orientation for the im2col operation.
+// N-major is preferred: the 64-wide "workgroup/thread" dimension spans N and the
+// smaller M dimension is tiled by 32 or 16 (the per-thread register tile).
+// When im2col_n is smaller than the 64-wide tile (tile_n), N-major would waste
+// threads, so the kernel switches to M-major (each thread owns one M row).
+// The tile sizes are performance-tuned and vary depending on the target device.
+Im2ColTileConfig ChooseTileSize(uint32_t im2col_m, uint32_t im2col_n) {
+  const bool is_m_major = im2col_n < kMajorTile;
+
+  // Candidate sizes for the minor (register-tiled) dimension, in descending
+  // order of preference. Larger tiles do more work per thread, so they are
+  // tried first and used as long as there are enough workgroups to dispatch.
+  const std::vector<uint32_t> small_tiles = {32, 16};
+
+  for (const uint32_t tile_small : small_tiles) {
+    const uint32_t tile_m = is_m_major ? kMajorTile : tile_small;
+    const uint32_t tile_n = is_m_major ? tile_small : kMajorTile;
+
+    const uint32_t dispatch = CeilDiv(im2col_m, tile_m) * CeilDiv(im2col_n, tile_n);
+    if (dispatch >= kMinDispatch) {
+      return {tile_m, tile_n, is_m_major};
     }
   }
 
-  // If none of the tile sizes meet the dispatch >=128 requirement,
-  return kTileSizes.back();
+  // None of the tile sizes met the dispatch requirement; fall back to the
+  // smallest tile to maximize the number of dispatched workgroups.
+  const uint32_t tile_small = small_tiles.back();
+  return {is_m_major ? kMajorTile : tile_small, is_m_major ? tile_small : kMajorTile, is_m_major};
 }
 
 // Add support for more devices.
@@ -64,12 +83,18 @@ Status Im2ColMatMulProgram::GenerateShaderCode(ShaderHelper& shader) const {
   }
   const auto& output = shader.AddOutput("output", ShaderUsage::UseValueTypeAlias | ShaderUsage::UseElementTypeAlias);
 
-  ORT_ENFORCE(tile_m_ == 16 || tile_m_ == 32, "tile_m must be 16 or 32.");
-  ORT_ENFORCE(tile_n_ == 64, "tile_n must be 64.");
   ORT_ENFORCE(vec_size_ == 1 || vec_size_ == 2 || vec_size_ == 4, "vec_size must be 1, 2 or 4.");
+  if (is_m_major_) {
+    ORT_ENFORCE(tile_m_ == 64, "tile_m must be 64 for m-major.");
+    ORT_ENFORCE(tile_n_ == 16 || tile_n_ == 32, "tile_n must be 16 or 32 for m-major.");
+  } else {
+    ORT_ENFORCE(tile_m_ == 16 || tile_m_ == 32, "tile_m must be 16 or 32 for n-major.");
+    ORT_ENFORCE(tile_n_ == 64, "tile_n must be 64 for n-major.");
+  }
 
   return WGSL_TEMPLATE_APPLY(shader, "nn/im2col_matmul.wgsl.template",
                              WGSL_TEMPLATE_PARAMETER(has_bias, has_bias_),
+                             WGSL_TEMPLATE_PARAMETER(is_m_major, is_m_major_),
                              WGSL_TEMPLATE_PARAMETER(tile_m, tile_m_),
                              WGSL_TEMPLATE_PARAMETER(tile_n, tile_n_),
                              WGSL_TEMPLATE_PARAMETER(use_subgroup, use_subgroup_),
@@ -115,8 +140,9 @@ Status ApplyIm2ColMatMulProgram(ComputeContext& context,
   const uint32_t im2col_k = kernel_height * kernel_width * channel_input;
   const uint32_t im2col_n = channel_output;
 
-  const auto [tile_m, tile_n] = ChooseTileSize(im2col_m, im2col_n);
-  const uint32_t workgroup_size = tile_n;
+  const auto [tile_m, tile_n, is_m_major] = ChooseTileSize(im2col_m, im2col_n);
+  // The workgroup always spans 64 threads over the major (64-wide) dimension.
+  const uint32_t workgroup_size = is_m_major ? tile_m : tile_n;
 
   // Check the device's subgroup size before shader compilation to avoid potential performance penalties
   // associated with conditional checks in the shader runtime.
@@ -125,7 +151,7 @@ Status ApplyIm2ColMatMulProgram(ComputeContext& context,
   // If the status of this condition is uncertain, the feature must be disabled.
   const bool use_subgroup = false;
   const uint32_t vec_size = channel_input % 4 == 0 ? 4 : (channel_input % 2 == 0 ? 2 : 1);
-  Im2ColMatMulProgram im2col_mm_program{has_bias, tile_m, tile_n, vec_size, use_subgroup};
+  Im2ColMatMulProgram im2col_mm_program{has_bias, tile_m, tile_n, vec_size, use_subgroup, is_m_major};
   im2col_mm_program.SetWorkgroupSize(workgroup_size);
 
   const uint32_t M_tiles = CeilDiv(im2col_m, tile_m);
@@ -161,7 +187,7 @@ Status ApplyIm2ColMatMulProgram(ComputeContext& context,
                                          {dilations},
                                          {pads},
                                          {strides}});
-  im2col_mm_program.CacheHint(has_bias, tile_m, tile_n, vec_size, use_subgroup);
+  im2col_mm_program.CacheHint(has_bias, tile_m, tile_n, vec_size, use_subgroup, is_m_major);
 
   return context.RunProgram(im2col_mm_program);
 }

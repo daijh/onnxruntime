@@ -797,6 +797,7 @@ std::vector<const char*> WebGpuContext::GetEnabledDeviceToggles() const {
 std::vector<const char*> WebGpuContext::GetDisabledDeviceToggles() const {
   constexpr const char* toggles[] = {
       "timestamp_quantization",
+      "d3d12_decompose_workgroup_access",
   };
   return std::vector<const char*>(std::begin(toggles), std::end(toggles));
 }

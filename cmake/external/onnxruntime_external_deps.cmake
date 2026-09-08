@@ -857,6 +857,10 @@ if (onnxruntime_USE_WEBGPU)
           #
           ${Patch_EXECUTABLE} --binary --ignore-whitespace -p1 < ${PROJECT_SOURCE_DIR}/patches/dawn/dawn_parallel_build_fix.patch &&
 
+          # Resolve the Agility SDK runtime relative to the Dawn module instead of the
+          # process working directory so packaged runtimes can locate D3D12Core.dll.
+          ${Patch_EXECUTABLE} --ignore-whitespace -p1 < ${PROJECT_SOURCE_DIR}/patches/dawn/dawn_agility_sdk_module_path.patch &&
+
           # Remove the test folder to speed up potential file scan operations (70k+ files not needed for build).
           # Using <SOURCE_DIR> token ensures the correct absolute path regardless of working directory.
           ${CMAKE_COMMAND} -E rm -rf <SOURCE_DIR>/test)

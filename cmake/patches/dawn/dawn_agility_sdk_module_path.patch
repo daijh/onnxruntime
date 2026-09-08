@@ -1,0 +1,10 @@
+diff --git a/src/dawn/native/d3d12/PlatformFunctionsD3D12.cpp b/src/dawn/native/d3d12/PlatformFunctionsD3D12.cpp
+--- a/src/dawn/native/d3d12/PlatformFunctionsD3D12.cpp
++++ b/src/dawn/native/d3d12/PlatformFunctionsD3D12.cpp
+@@ -160,2 +160,5 @@ void PlatformFunctions::EnsureAgilitySDKDeviceFactory() {
+-    DAWN_CHECK(SUCCEEDED(sdkConfig1->CreateDeviceFactory(D3D12_PREVIEW_SDK_VERSION, ".\\D3D12\\",
++    auto moduleDirectory = GetModuleDirectory();
++    DAWN_CHECK(moduleDirectory.has_value());
++    std::string sdkPath = std::move(*moduleDirectory) + "D3D12" + GetPathSeparator();
++    DAWN_CHECK(SUCCEEDED(sdkConfig1->CreateDeviceFactory(D3D12_PREVIEW_SDK_VERSION, sdkPath.c_str(),
+                                                          IID_PPV_ARGS(&mDeviceFactory))));

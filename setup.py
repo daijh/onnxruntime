@@ -549,6 +549,11 @@ if is_manylinux:
     ]
 else:
     data = [path.join("capi", x) for x in libs if glob(path.join("onnxruntime", "capi", x))]
+    data += [
+        path.join("capi", "D3D12", x)
+        for x in ("D3D12Core.dll", "d3d12SDKLayers.dll")
+        if path.isfile(path.join("onnxruntime", "capi", "D3D12", x))
+    ]
     ext_modules = []
 
 # Additional examples

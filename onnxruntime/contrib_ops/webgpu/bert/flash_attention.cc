@@ -554,7 +554,6 @@ Status FlashAttentionPrefillSimpleProgram::GenerateShaderCode(ShaderHelper& shad
                              WGSL_TEMPLATE_PARAMETER(has_attention_bias, has_attention_bias_),
                              WGSL_TEMPLATE_PARAMETER(has_head_sink, has_head_sink_),
                              WGSL_TEMPLATE_PARAMETER(has_local_window, has_local_window_),
-                             WGSL_TEMPLATE_PARAMETER(is_fp16, is_fp16_),
                              WGSL_TEMPLATE_PARAMETER(is_unidirectional, is_unidirectional_),
                              WGSL_TEMPLATE_PARAMETER(kv_step_param, kv_step_),
                              WGSL_TEMPLATE_PARAMETER(q_BNSH, q_BNSH_),
@@ -579,7 +578,6 @@ Status ApplyFlashAttentionPrefillSimple(onnxruntime::webgpu::ComputeContext& con
                                         Tensor* attn_output,
                                         const WebgpuAttentionParameters& parameters,
                                         bool has_attention_bias,
-                                        bool is_fp16,
                                         bool use_seqlen_k,
                                         bool has_local_window,
                                         int local_window_size,
@@ -613,7 +611,6 @@ Status ApplyFlashAttentionPrefillSimple(onnxruntime::webgpu::ComputeContext& con
 
   FlashAttentionPrefillSimpleProgram program{"FlashAttentionPrefillSimple",
                                              has_attention_bias,
-                                             is_fp16,
                                              parameters.is_unidirectional_,
                                              parameters.head_size_,
                                              parameters.num_heads_,
@@ -1443,7 +1440,7 @@ Status ApplyFlashAttention(const Tensor* Q, const Tensor* K, const Tensor* V, co
       if (CanApplyFlashAttentionPrefillSimple(is_intel, subgroup_min_size, kv_cache_quantization_enabled)) {
         ORT_RETURN_IF_ERROR(ApplyFlashAttentionPrefillSimple(
             context, Q, present_key, present_value, attention_bias, seqlen_k, attn_output,
-            parameters, has_attention_bias, is_fp16, use_seqlen_k, has_local_window, local_window_size,
+            parameters, has_attention_bias, use_seqlen_k, has_local_window, local_window_size,
             present_sequence_length, subgroup_min_size, alpha, attn_bias_dim0, attn_bias_dim1, attn_bias_dim3,
             use_seqlens_q, seqlens_q, q_BNSH, has_head_sink, head_sink));
       } else {

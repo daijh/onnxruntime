@@ -15,7 +15,7 @@ namespace webgpu {
 
 std::string GenerateZeroPointReadingCode(uint32_t nbits, bool has_zero_points,
                                          const std::string& output_type) {
-  ORT_ENFORCE(nbits == 8 || nbits == 4, "Only 4/8 bits are supported for webgpu matmulnbits");
+  ORT_ENFORCE(nbits == 2 || nbits == 4 || nbits == 8, "Only 2/4/8 bits are supported for webgpu matmulnbits");
   std::stringstream ss;
 
   if (has_zero_points) {
@@ -35,7 +35,7 @@ fn mm_read_zero(matrix_idx: u32, row : u32, col : u32, r_dim: u32, c_dim: u32) -
     // Extract the nbits component
     let shift_amount = component_index * bits;
 )";
-    ss << "    let masked_value = (packed_value >> shift_amount) & " << (nbits == 4 ? "0xFu" : "0xFF") << ";\n";
+    ss << "    let masked_value = (packed_value >> shift_amount) & " << ((1u << nbits) - 1u) << "u;\n";
     ss << R"(
     return )"
        << output_type << R"((masked_value);
@@ -45,7 +45,7 @@ fn mm_read_zero(matrix_idx: u32, row : u32, col : u32, r_dim: u32, c_dim: u32) -
 }
 )";
   } else {
-    ss << "const default_zero_point = " << (nbits == 4 ? 8 : 128) << ";\n";
+    ss << "const default_zero_point = " << (1u << (nbits - 1)) << ";\n";
     ss << R"(
 fn mm_read_zero(matrix_idx: u32, row : u32, col : u32, r_dim: u32, c_dim: u32) -> )"
        << output_type << R"( {

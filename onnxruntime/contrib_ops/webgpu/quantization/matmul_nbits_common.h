@@ -23,7 +23,7 @@ inline constexpr uint32_t kMinMForTileOptimization = 4u;
 /**
  * Generates WebGPU shader code for reading zero points in quantized matrix multiplication
  *
- * @param nbits Number of bits for quantization (4 or 8)
+ * @param nbits Number of bits for quantization (2, 4, or 8)
  * @param has_zero_points Whether zero points are provided as an input
  * @param output_type Type name to use for zero point values in the generated code (default: "output_element_t")
  * @return String containing the generated WebGPU shader code

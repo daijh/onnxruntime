@@ -36,11 +36,7 @@ alias acc_element_t = output_element_t;
 // TODO: Move to matmulnbits_common template
 #if has_zero_points
 fn load_zero(row : u32, col : u32, r_dim : u32, c_dim : u32) -> output_element_t {
-#if nbits == 4
-  const elements_in_uint32 = 8u;
-#else  // nbits == 8
-  const elements_in_uint32 = 4u;
-#endif
+  const elements_in_uint32 = 32u / nbits;
 
   const bits : u32 = nbits;
 
@@ -64,11 +60,7 @@ fn load_zero(row : u32, col : u32, r_dim : u32, c_dim : u32) -> output_element_t
     // Extract the nbits component
     let shift_amount = component_index * bits;
 
-#if nbits == 4
-    let masked_value = (packed_value >> shift_amount) & 0xF;
-#else  // nbits == 8
-    let masked_value = (packed_value >> shift_amount) & 0xFF;
-#endif
+    let masked_value = (packed_value >> shift_amount) & ((1u << bits) - 1u);
 
     return output_element_t(masked_value);
   }
@@ -77,11 +69,7 @@ fn load_zero(row : u32, col : u32, r_dim : u32, c_dim : u32) -> output_element_t
 }
 #else
 fn load_zero(row : u32, col : u32, r_dim : u32, c_dim : u32) -> output_element_t {
-#if nbits == 4
-  return output_element_t(8);
-#else  // nbits == 8
-  return output_element_t(128);
-#endif
+  return output_element_t(1u << (nbits - 1));
 }
 #endif
 
@@ -123,7 +111,38 @@ fn write_output(batch : u32, row : u32, col : u32, value : output_element_t) {
   }
 }
 
-#if nbits == 4
+#if nbits == 2
+fn load_b(row : u32, block_idx : u32) -> array<u32, 4> {
+  if (row < uniforms.N && block_idx < uniforms.K_of_b) {
+#if has_weight_idx
+#if has_weight_idx_indirect
+    let actual_weight_idx = weight_index_indirect[uniforms.weight_idx];
+#else
+    let actual_weight_idx = uniforms.weight_idx;
+#endif
+    let b_offset = actual_weight_idx * uniforms.K_of_b * uniforms.N;
+#else
+    let b_offset = 0u;
+#endif
+    let packed = b.getByOffset(row * uniforms.K_of_b + block_idx + b_offset);
+    // Each word contains 16 codes; split it into the four 8-value slices used by the tile.
+    return array<u32, 4>(packed[0] & 0xFFFFu, packed[0] >> 16u,
+                         packed[1] & 0xFFFFu, packed[1] >> 16u);
+  }
+  return array<u32, 4>();
+}
+
+fn dequantize(packed_data : u32,
+              zero_point : output_element_t,
+              scale : output_element_t) -> mat2x4<output_element_t> {
+  let shifts = vec4<u32>(0u, 2u, 4u, 6u);
+  let lower = (vec4<u32>(packed_data) >> shifts) & vec4<u32>(3u);
+  let upper = (vec4<u32>(packed_data) >> (shifts + vec4<u32>(8u))) & vec4<u32>(3u);
+  return mat2x4<output_element_t>(
+      (vec4<output_element_t>(lower) - vec4<output_element_t>(zero_point)) * scale,
+      (vec4<output_element_t>(upper) - vec4<output_element_t>(zero_point)) * scale);
+}
+#elif nbits == 4
 fn load_b(row : u32, block_idx : u32) -> vec4<input_b_element_t> {
   if (row < uniforms.N && block_idx < uniforms.K_of_b) {
 #if has_weight_idx

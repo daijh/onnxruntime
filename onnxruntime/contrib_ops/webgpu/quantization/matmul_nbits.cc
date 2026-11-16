@@ -53,7 +53,7 @@ Status MatMulNBitsWideTileProgram::GenerateShaderCode(ShaderHelper& shader) cons
   const uint32_t workgroup_size = WorkgroupSizeX() * WorkgroupSizeY() * WorkgroupSizeZ();
   ORT_ENFORCE(tile_n_ == workgroup_size, "tile_n must be workgroup_size.");
   ORT_ENFORCE(tile_m_ % (workgroup_size / 8) == 0, "tile_m must be a multiple of workgroup_size / 8.");
-  ORT_ENFORCE(nbits_ == 4 || nbits_ == 8, "Only 4/8 bits are supported for webgpu matmulnbits.");
+  ORT_ENFORCE(nbits_ == 2 || nbits_ == 4 || nbits_ == 8, "Only 2/4/8 bits are supported for webgpu matmulnbits.");
 
   return WGSL_TEMPLATE_APPLY(
       shader, "quantization/matmul_nbits_wide_tile.wgsl.template", WGSL_TEMPLATE_PARAMETER(acc_f32, acc_f32_),
@@ -126,7 +126,7 @@ bool CanApplyWideTileMatMulNBits(uint32_t M,
                                  bool has_weight_idx_indirect,
                                  uint32_t components_a,
                                  uint32_t components_b) {
-  if (has_weight_idx_indirect || block_size != 32 || (nbits != 4 && nbits != 8) ||
+  if (has_weight_idx_indirect || block_size != 32 || (nbits != 2 && nbits != 4 && nbits != 8) ||
       M < kMinMForTileOptimization) {
     return false;
   }
@@ -140,7 +140,7 @@ bool CanApplyWideTileMatMulNBits(uint32_t M,
     components_b = GetMaxComponents(blob_size_in_words);
   }
 
-  return components_a == 4 && components_b == 4;
+  return components_a == 4 && components_b == (nbits == 2 ? 2u : 4u);
 }
 
 namespace {

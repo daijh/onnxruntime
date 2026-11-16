@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #include "gtest/gtest.h"
@@ -22,8 +23,10 @@ namespace onnxruntime {
 namespace test {
 namespace {
 
+template <typename T = MLFloat16>
 void RunMatMulNBitsTileTest(int64_t bits, int64_t M, int64_t N, int64_t K,
-                            bool has_zero_points, bool has_bias, int64_t batch_count = 1, int64_t block_size = 32) {
+                            bool has_zero_points, bool has_bias, int64_t batch_count = 1,
+                            int64_t block_size = 32, int64_t accuracy_level = 4) {
   SCOPED_TRACE(testing::Message() << "bits=" << bits << ", M=" << M << ", N=" << N << ", K=" << K
                                   << ", block_size=" << block_size << ", zero_points=" << has_zero_points
                                   << ", bias=" << has_bias);
@@ -31,8 +34,10 @@ void RunMatMulNBitsTileTest(int64_t bits, int64_t M, int64_t N, int64_t K,
   auto provider = DefaultWebGpuExecutionProvider();
   ASSERT_NE(provider, nullptr);
   const auto& context = webgpu::WebGpuContextFactory::GetContext(provider->GetDeviceId());
-  if (!context.DeviceHasFeature(wgpu::FeatureName::ShaderF16)) {
-    GTEST_SKIP() << "WebGPU adapter does not support shader-f16";
+  if constexpr (std::is_same_v<T, MLFloat16>) {
+    if (!context.DeviceHasFeature(wgpu::FeatureName::ShaderF16)) {
+      GTEST_SKIP() << "WebGPU adapter does not support shader-f16";
+    }
   }
 
   const int64_t blocks = (K + block_size - 1) / block_size;
@@ -42,12 +47,26 @@ void RunMatMulNBitsTileTest(int64_t bits, int64_t M, int64_t N, int64_t K,
   const int32_t default_zero_point = 1 << (bits - 1);
 
   RandomValueGenerator random{1234};
-  const auto a = FloatsToMLFloat16s(random.Gaussian<float>(AsSpan({batch_count * M, K}), 0.0f, 0.25f));
+  const auto to_tensor_values = [](const auto& values) {
+    if constexpr (std::is_same_v<T, MLFloat16>) {
+      return FloatsToMLFloat16s(values);
+    } else {
+      return values;
+    }
+  };
+  const auto to_float = [](T value) {
+    if constexpr (std::is_same_v<T, MLFloat16>) {
+      return value.ToFloat();
+    } else {
+      return value;
+    }
+  };
+  const auto a = to_tensor_values(random.Gaussian<float>(AsSpan({batch_count * M, K}), 0.0f, 0.25f));
   const auto weights = random.Uniform<int32_t>(AsSpan({N, K}), 0, (1 << bits) - 1);
-  const auto bias = FloatsToMLFloat16s(random.Uniform<float>(AsSpan({N}), -0.5f, 0.5f));
+  const auto bias = to_tensor_values(random.Uniform<float>(AsSpan({N}), -0.5f, 0.5f));
   InlinedVector<uint8_t> packed_weights(N * blocks * blob_size, 0);
   InlinedVector<uint8_t> packed_zero_points(N * zero_point_bytes, 0);
-  InlinedVector<MLFloat16> scales(N * blocks);
+  InlinedVector<T> scales(N * blocks);
   InlinedVector<float> dequantized_weights(N * K);
 
   // Construct the quantized inputs locally; the reference uses the unpacked values
@@ -55,10 +74,12 @@ void RunMatMulNBitsTileTest(int64_t bits, int64_t M, int64_t N, int64_t K,
   for (int64_t n = 0; n < N; ++n) {
     for (int64_t block = 0; block < blocks; ++block) {
       const int64_t scale_index = n * blocks + block;
-      scales[scale_index] = MLFloat16(static_cast<float>(1 + scale_index % 4) /
-                                      (bits == 4 ? 128.0f : 2048.0f));
+      // Scale divisor keeps dequantized weights small enough for the fp16 tolerance below.
+      const float scale_divisor = bits == 2 ? 8.0f : (bits == 4 ? 128.0f : 2048.0f);
+      scales[scale_index] = T(static_cast<float>(1 + scale_index % 4) / scale_divisor);
       const int32_t zero_point = has_zero_points
-                                     ? default_zero_point + static_cast<int32_t>(scale_index % 5) - 2
+                                     ? (bits == 2 ? static_cast<int32_t>(scale_index % 4)
+                                                  : default_zero_point + static_cast<int32_t>(scale_index % 5) - 2)
                                      : default_zero_point;
       packed_zero_points[n * zero_point_bytes + block / values_per_byte] |=
           static_cast<uint8_t>(zero_point << ((block % values_per_byte) * bits));
@@ -67,7 +88,7 @@ void RunMatMulNBitsTileTest(int64_t bits, int64_t M, int64_t N, int64_t K,
         const int64_t packed_index = (n * blocks + block) * blob_size + (k % block_size) / values_per_byte;
         packed_weights[packed_index] |=
             static_cast<uint8_t>(weights[index] << ((k % values_per_byte) * bits));
-        dequantized_weights[index] = static_cast<float>(weights[index] - zero_point) * scales[scale_index].ToFloat();
+        dequantized_weights[index] = static_cast<float>(weights[index] - zero_point) * to_float(scales[scale_index]);
       }
     }
     // Nonzero padding must not contribute to the logical K-element dot product.
@@ -77,14 +98,14 @@ void RunMatMulNBitsTileTest(int64_t bits, int64_t M, int64_t N, int64_t K,
     }
   }
 
-  InlinedVector<MLFloat16> expected(batch_count * M * N);
+  InlinedVector<T> expected(batch_count * M * N);
   for (int64_t m = 0; m < batch_count * M; ++m) {
     for (int64_t n = 0; n < N; ++n) {
       float sum = 0.0f;
       for (int64_t k = 0; k < K; ++k) {
-        sum += a[m * K + k].ToFloat() * dequantized_weights[n * K + k];
+        sum += to_float(a[m * K + k]) * dequantized_weights[n * K + k];
       }
-      expected[m * N + n] = MLFloat16(sum + (has_bias ? bias[n].ToFloat() : 0.0f));
+      expected[m * N + n] = T(sum + (has_bias ? to_float(bias[n]) : 0.0f));
     }
   }
 
@@ -93,14 +114,14 @@ void RunMatMulNBitsTileTest(int64_t bits, int64_t M, int64_t N, int64_t K,
   test.AddAttribute<int64_t>("N", N);
   test.AddAttribute<int64_t>("bits", bits);
   test.AddAttribute<int64_t>("block_size", block_size);
-  test.AddAttribute<int64_t>("accuracy_level", 4);
+  test.AddAttribute<int64_t>("accuracy_level", accuracy_level);
   const TensorShapeVector a_shape = batch_count == 1 ? TensorShapeVector{M, K}
                                                      : TensorShapeVector{batch_count, M, K};
   const TensorShapeVector y_shape = batch_count == 1 ? TensorShapeVector{M, N}
                                                      : TensorShapeVector{batch_count, M, N};
-  test.AddInput<MLFloat16>("A", a_shape, a);
+  test.AddInput<T>("A", a_shape, a);
   test.AddInput<uint8_t>("B", {N, blocks, blob_size}, packed_weights.data(), packed_weights.size(), true);
-  test.AddInput<MLFloat16>("scales", {N, blocks}, scales.data(), scales.size(), true);
+  test.AddInput<T>("scales", {N, blocks}, scales.data(), scales.size(), true);
   if (has_zero_points) {
     test.AddInput<uint8_t>("zero_points", {N, zero_point_bytes}, packed_zero_points.data(), packed_zero_points.size(), true);
   } else {
@@ -108,11 +129,18 @@ void RunMatMulNBitsTileTest(int64_t bits, int64_t M, int64_t N, int64_t K,
   }
   test.AddOptionalInputEdge<int32_t>();  // g_idx
   if (has_bias) {
-    test.AddInput<MLFloat16>("bias", {N}, bias, true);
+    test.AddInput<T>("bias", {N}, bias, true);
   }
-  test.AddOutput<MLFloat16>("Y", y_shape, expected.data(), expected.size());
-  test.SetOutputAbsErr("Y", 0.1f);
-  test.SetOutputRelErr("Y", 0.02f);
+  test.AddOutput<T>("Y", y_shape, expected.data(), expected.size());
+  if constexpr (std::is_same_v<T, float>) {
+    // fp32 accumulation order differs from the reference sum; allow a little slack.
+    test.SetOutputAbsErr("Y", 0.0001f);
+    test.SetOutputRelErr("Y", 0.0001f);
+  } else {
+    // 2-bit uses larger scales (1/8) with a tighter absolute tolerance than 4/8-bit.
+    test.SetOutputAbsErr("Y", bits == 2 ? 0.01f : 0.1f);
+    test.SetOutputRelErr("Y", 0.02f);
+  }
 
   SessionOptions options;
   ASSERT_STATUS_OK(options.config_options.AddConfigEntry(kOrtSessionOptionsDisableCPUEPFallback, "1"));
@@ -149,6 +177,36 @@ void RunMatMulNBitsTileTests(int64_t bits) {
 }
 
 }  // namespace
+
+TEST(WebGpuMatMulNBitsTest, Float16_2Bits_WideTile_Block32) {
+  for (bool has_zero_points : {false, true}) {
+    for (bool has_bias : {false, true}) {
+      RunMatMulNBitsTileTest(2, 8, 64, 128, has_zero_points, has_bias, 1, 32, 0);
+      RunMatMulNBitsTileTest(2, 33, 130, 160, has_zero_points, has_bias, 2, 32, 0);
+    }
+  }
+}
+
+TEST(WebGpuMatMulNBitsTest, Float32_2Bits_WideTile_Block32) {
+  for (bool has_zero_points : {false, true}) {
+    RunMatMulNBitsTileTest<float>(2, 8, 65, 160, has_zero_points, false, 1, 32, 0);
+  }
+}
+
+TEST(WebGpuMatMulNBitsTest, Float32_2Bits_Generic_Block32) {
+  for (bool has_zero_points : {false, true}) {
+    RunMatMulNBitsTileTest<float>(2, 2, 9, 160, has_zero_points, false, 1, 32, 0);
+  }
+}
+
+TEST(WebGpuMatMulNBitsTest, Float16_2Bits_Generic_Block128) {
+  for (bool has_zero_points : {false, true}) {
+    for (bool has_bias : {false, true}) {
+      RunMatMulNBitsTileTest(2, 1, 9, 384, has_zero_points, has_bias, 2, 128, 0);
+      RunMatMulNBitsTileTest(2, 3, 17, 640, has_zero_points, has_bias, 1, 128, 0);
+    }
+  }
+}
 
 TEST(WebGpuMatMulNBitsTest, Float16_4Bits_SubgroupMatrixTiles) {
   RunMatMulNBitsTileTests(4);

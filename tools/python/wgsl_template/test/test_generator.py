@@ -228,6 +228,30 @@ values[j] = 1;
                 out = _gen("#use loop\nloop(k, 0, 2) {\nlet\nvalue = k;\n}\n", generator=mode)
                 self.assertEqual(out.count("ss << __loop_0_index;"), 1)
 
+    def test_declarations_after_loop_closes_on_same_line(self) -> None:
+        for declaration in ("let k = 1;", "var<function> k : i32 = 1;", "let\nk = 1;"):
+            for mode in ("static-cpp", "static-cpp-literal"):
+                with self.subTest(declaration=declaration, mode=mode):
+                    out = _gen(f"#use loop\nloop(k, 0, 2) {{\nvalues[k] = 0;\n}} {declaration}\n", generator=mode)
+                    self.assertEqual(out.count("ss << __loop_0_index;"), 1)
+
+    def test_declarations_after_nested_loop_closes(self) -> None:
+        for mode in ("static-cpp", "static-cpp-literal"):
+            for closing in ("} let j = 1;\n}", "} } let i = 1;"):
+                with self.subTest(closing=closing, mode=mode):
+                    out = _gen("#use loop\nloop(i, 0, 2) {\nloop(j, 0, 2) {\n" + closing + "\n", generator=mode)
+                    self.assertEqual(out.count("for (int64_t"), 2)
+            for text in (
+                "loop(i, 0, 2) {\nloop(j, 0, 2) {\n} let i = 1;\n}",
+                "loop(k, 0, 2) {\n{\n} let k = 1;\n}",
+                "loop(k, 0, 2) {\nlet k = 1; } let k = 2;",
+            ):
+                with (
+                    self.subTest(text=text, mode=mode),
+                    self.assertRaisesRegex(WgslTemplateGenerateError, "Cannot redeclare a template loop index"),
+                ):
+                    _gen("#use loop\n" + text + "\n", generator=mode)
+
     def test_member_selectors_across_conditional_branches(self) -> None:
         text = """#use loop
 #param FLAG

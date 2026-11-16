@@ -431,11 +431,10 @@ def _generate_impl(state: _GeneratorState, preserve_code_reference: bool) -> Non
                 name = restline[span[0] : span[1]]
             output("expression", cg.property(caller, name))
 
-    def process_current_line(line: str) -> None:
-        """Tokenize and emit ``line`` from ``current_column`` onward."""
+    def check_declarations(content: str) -> None:
         nonlocal declaration_context
         if pre_processor_expression is None:
-            for token in re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*|[^\s]", line[state.current_column :]):
+            for token in re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*|[^\s]", content):
                 next_context = set()
                 for context in declaration_context:
                     if context == "var" and token == "<":
@@ -449,12 +448,16 @@ def _generate_impl(state: _GeneratorState, preserve_code_reference: bool) -> Non
                             loop_error("Cannot redeclare a template loop index")
                         next_context.add("var" if token == "var" else "name" if token in ("let", "const") else "none")
                 declaration_context = next_context
+
+    def process_current_line(line: str) -> None:
+        """Tokenize and emit ``line`` from ``current_column`` onward."""
         while state.current_column < len(line):
             restline = line[state.current_column :]
             nxt = _match_next_pattern(restline, patterns)
             if nxt is None:
                 break
             start_idx = nxt[1]
+            check_declarations(restline[: start_idx + nxt[2]])
             if start_idx > 0:
                 prefix = line[state.current_column : state.current_column + start_idx]
                 closes_template_loop = (
@@ -466,6 +469,7 @@ def _generate_impl(state: _GeneratorState, preserve_code_reference: bool) -> Non
                     output("code", prefix)
             process_pattern_match(line, restline, nxt)
         if state.current_column < len(line):
+            check_declarations(line[state.current_column :])
             output("code", line[state.current_column :])
         output("code", "\n")
 

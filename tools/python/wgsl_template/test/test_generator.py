@@ -235,6 +235,29 @@ values[j] = 1;
                     out = _gen(f"#use loop\nloop(k, 0, 2) {{\nvalues[k] = 0;\n}} {declaration}\n", generator=mode)
                     self.assertEqual(out.count("ss << __loop_0_index;"), 1)
 
+    def test_break_continue_after_loop_closes_on_same_line(self) -> None:
+        for statement in ("break;", "continue;", "if (done) { break; }"):
+            for mode in ("static-cpp", "static-cpp-literal"):
+                with self.subTest(statement=statement, mode=mode):
+                    out = _gen(
+                        "#use loop\nfor (var i = 0; i < 4; i++) {\nloop(k, 0, 2) {\nvalues[k] = 0;\n} "
+                        + statement
+                        + "\n}\n",
+                        generator=mode,
+                    )
+                    self.assertEqual(out.count("ss << __loop_0_index;"), 1)
+        for text in (
+            "loop(i, 0, 2) {\nloop(j, 0, 2) {\n} break;\n}",
+            "loop(k, 0, 2) {\nbreak; }",
+            "loop(k, 0, 2) {\nvalues[k] = 0;\n{\n} continue;\n}",
+        ):
+            for mode in ("static-cpp", "static-cpp-literal"):
+                with (
+                    self.subTest(text=text, mode=mode),
+                    self.assertRaisesRegex(WgslTemplateGenerateError, "break and continue are not supported"),
+                ):
+                    _gen("#use loop\n" + text + "\n", generator=mode)
+
     def test_declarations_after_nested_loop_closes(self) -> None:
         for mode in ("static-cpp", "static-cpp-literal"):
             for closing in ("} let j = 1;\n}", "} } let i = 1;"):

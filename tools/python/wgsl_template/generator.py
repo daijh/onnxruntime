@@ -431,10 +431,12 @@ def _generate_impl(state: _GeneratorState, preserve_code_reference: bool) -> Non
                 name = restline[span[0] : span[1]]
             output("expression", cg.property(caller, name))
 
-    def check_declarations(content: str) -> None:
+    def check_loop_body_tokens(content: str) -> None:
         nonlocal declaration_context
         if pre_processor_expression is None:
             for token in re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*|[^\s]", content):
+                if state.loops and token in ("break", "continue"):
+                    loop_error("break and continue are not supported inside template loops")
                 next_context = set()
                 for context in declaration_context:
                     if context == "var" and token == "<":
@@ -457,7 +459,7 @@ def _generate_impl(state: _GeneratorState, preserve_code_reference: bool) -> Non
             if nxt is None:
                 break
             start_idx = nxt[1]
-            check_declarations(restline[: start_idx + nxt[2]])
+            check_loop_body_tokens(restline[: start_idx + nxt[2]])
             if start_idx > 0:
                 prefix = line[state.current_column : state.current_column + start_idx]
                 closes_template_loop = (
@@ -469,7 +471,7 @@ def _generate_impl(state: _GeneratorState, preserve_code_reference: bool) -> Non
                     output("code", prefix)
             process_pattern_match(line, restline, nxt)
         if state.current_column < len(line):
-            check_declarations(line[state.current_column :])
+            check_loop_body_tokens(line[state.current_column :])
             output("code", line[state.current_column :])
         output("code", "\n")
 
@@ -625,8 +627,6 @@ def _generate_impl(state: _GeneratorState, preserve_code_reference: bool) -> Non
         if start_loop(line):
             continue
         if state.loops:
-            if re.search(r"\b(break|continue)\b", line):
-                loop_error("break and continue are not supported inside template loops")
             if stripped.startswith(("#elif", "#else", "#endif")) and len(if_stack) <= state.loops[-1].if_depth:
                 loop_error("Conditional directive crosses loop boundary")
         if stripped.startswith("#"):

@@ -181,7 +181,9 @@ outer loop index, such as `loop(col, row, TILE_COLS)`.
   block, repeated statements share the surrounding shader scope.
 - Do not redeclare an active index
   or reuse a parameter or shader variable name as an index. `break` and
-  `continue` anywhere inside template loops are unsupported in this version.
+  `continue` may target only WGSL `for`, `while`, `loop`, or `switch`
+  statements nested inside the template loop body; they cannot exit the
+  template loop itself.
 - Keep each loop body balanced, including conditional directives. Ordinary
   WGSL `for (...)` and `loop { ... }` retain their shader-side behavior.
 

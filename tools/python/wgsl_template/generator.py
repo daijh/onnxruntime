@@ -62,6 +62,9 @@ class _LoopState:
 # preprocessIfStack entry: (type, init_paren, init_bracket, prev_paren, prev_bracket)
 _IfStackEntry = list[object]
 
+# Open WGSL blocks ("template" marks a template loop body) and the breakable keyword awaiting its "{".
+_BlockState = tuple[tuple[str, ...], str | None]
+
 
 @dataclass
 class _GeneratorState:
@@ -147,6 +150,8 @@ def _generate_impl(state: _GeneratorState, preserve_code_reference: bool) -> Non
     declaration_stack: list[tuple[set[str], set[str]]] = []
     square_bracket_context = {0}
     square_bracket_stack: list[tuple[set[int], set[int]]] = []
+    block_context: set[_BlockState] = {((), None)}
+    block_stack: list[tuple[set[_BlockState], set[_BlockState]]] = []
 
     def output(typ: str, content: str) -> None:
         nonlocal pre_processor_expression, selector_context
@@ -432,11 +437,25 @@ def _generate_impl(state: _GeneratorState, preserve_code_reference: bool) -> Non
             output("expression", cg.property(caller, name))
 
     def check_loop_body_tokens(content: str) -> None:
-        nonlocal declaration_context
+        nonlocal declaration_context, block_context
         if pre_processor_expression is None:
             for token in re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*|[^\s]", content):
-                if state.loops and token in ("break", "continue"):
-                    loop_error("break and continue are not supported inside template loops")
+                next_blocks = set()
+                for blocks, pending in block_context:
+                    if token in ("break", "continue"):
+                        targets = ("for", "while", "loop") + (("switch",) if token == "break" else ())
+                        target = next((b for b in reversed(blocks) if b in targets or b == "template"), None)
+                        if target == "template":
+                            loop_error("break and continue cannot exit a template loop body")
+                    if token == "{":
+                        next_blocks.add(((*blocks, pending or "block"), None))
+                    elif token == "}":
+                        next_blocks.add((blocks[:-1], None))
+                    elif token in ("for", "while", "loop", "switch"):
+                        next_blocks.add((blocks, token))
+                    else:
+                        next_blocks.add((blocks, pending))
+                block_context = next_blocks
                 next_context = set()
                 for context in declaration_context:
                     if context == "var" and token == "<":
@@ -535,6 +554,7 @@ def _generate_impl(state: _GeneratorState, preserve_code_reference: bool) -> Non
         return render(tree.body)
 
     def start_loop(line: str) -> bool:
+        nonlocal block_context
         if not any(p.type == "loop" for p in patterns) or not re.match(r"\s*loop\s*\(", line):
             return False
         if state.current_parentheses_state or fn_call:
@@ -595,6 +615,7 @@ def _generate_impl(state: _GeneratorState, preserve_code_reference: bool) -> Non
         patterns.insert(0, pattern)
         state.current_bracket_state += 1
         state.loops.append(_LoopState(pattern, state.current_bracket_state, len(if_stack), state.current_line + 1))
+        block_context = {((*blocks, "template"), None) for blocks, _ in block_context}
         return True
 
     previous_line_was_empty = True
@@ -699,6 +720,7 @@ def _generate_impl(state: _GeneratorState, preserve_code_reference: bool) -> Non
                 state.current_column = leading_ws + 4
                 selector_stack.append((selector_context.copy(), set()))
                 declaration_stack.append((declaration_context.copy(), set()))
+                block_stack.append((block_context.copy(), set()))
                 square_bracket_stack.append((square_bracket_context.copy(), set()))
                 if_stack.append(
                     [
@@ -768,6 +790,8 @@ def _generate_impl(state: _GeneratorState, preserve_code_reference: bool) -> Non
                 selector_context = selector_stack[-1][0].copy()
                 declaration_stack[-1][1].update(declaration_context)
                 declaration_context = declaration_stack[-1][0].copy()
+                block_stack[-1][1].update(block_context)
+                block_context = block_stack[-1][0].copy()
                 square_bracket_stack[-1][1].update(square_bracket_context)
                 square_bracket_context = square_bracket_stack[-1][0].copy()
 
@@ -842,6 +866,8 @@ def _generate_impl(state: _GeneratorState, preserve_code_reference: bool) -> Non
                 selector_context = selector_stack[-1][0].copy()
                 declaration_stack[-1][1].update(declaration_context)
                 declaration_context = declaration_stack[-1][0].copy()
+                block_stack[-1][1].update(block_context)
+                block_context = block_stack[-1][0].copy()
                 square_bracket_stack[-1][1].update(square_bracket_context)
                 square_bracket_context = square_bracket_stack[-1][0].copy()
 
@@ -908,6 +934,11 @@ def _generate_impl(state: _GeneratorState, preserve_code_reference: bool) -> Non
                 if if_stack[-1][0] != "else":
                     declaration_endings.update(initial_declaration)
                 declaration_context = declaration_endings
+                initial_blocks, block_endings = block_stack.pop()
+                block_endings.update(block_context)
+                if if_stack[-1][0] != "else":
+                    block_endings.update(initial_blocks)
+                block_context = block_endings
                 initial_square_bracket, square_bracket_endings = square_bracket_stack.pop()
                 square_bracket_endings.update(square_bracket_context)
                 if if_stack[-1][0] != "else":

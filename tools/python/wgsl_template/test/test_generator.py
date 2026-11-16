@@ -246,17 +246,40 @@ values[j] = 1;
                         generator=mode,
                     )
                     self.assertEqual(out.count("ss << __loop_0_index;"), 1)
+
+    def test_break_continue_targeting_nested_wgsl_statements(self) -> None:
+        for body in (
+            "for (var i = 0; i < 2; i++) {\nif (i == k) { break; }\ncontinue;\n}",
+            "for (var i = 0;\ni < 2;\ni++)\n{\nbreak;\n}",
+            "while (x < k) {\nx++;\nbreak;\n}",
+            "loop {\nif (x > k) { break; }\ncontinuing {\nbreak if x > k;\n}\n}",
+            "switch k {\ncase 0: {\nbreak;\n}\ndefault: {\nfor (var i = 0; i < 2; i++) { continue; }\n}\n}",
+            "#if FLAG\nfor (var i = 0; i < 2; i++) {\n#else\nwhile (x < k) {\n#endif\nbreak;\n}",
+            "loop(j, 0, 2) {\nfor (var i = 0; i < j; i++) {\nbreak;\n}\n}",
+        ):
+            for mode in ("static-cpp", "static-cpp-literal"):
+                with self.subTest(body=body, mode=mode):
+                    out = _gen(f"#use loop\n#param FLAG\nloop(k, 0, 2) {{\n{body}\n}}\n", generator=mode)
+                    self.assertIn("__loop_0_index", out)
+
+    def test_break_continue_cannot_exit_template_loop(self) -> None:
         for text in (
             "loop(i, 0, 2) {\nloop(j, 0, 2) {\n} break;\n}",
             "loop(k, 0, 2) {\nbreak; }",
             "loop(k, 0, 2) {\nvalues[k] = 0;\n{\n} continue;\n}",
+            "loop(k, 0, 2) {\nfor (var i = 0; i < 2; i++) {\n}\nbreak;\n}",
+            "loop(k, 0, 2) {\nswitch k {\ndefault: {\ncontinue;\n}\n}\n}",
+            "loop(k, 0, 2) {\nif (k == 0) {\nbreak;\n}\n}",
+            "for (var i = 0; i < 2; i++) {\nloop(k, 0, 2) {\nbreak;\n}\n}",
+            "loop {\nloop(k, 0, 2) {\n{\ncontinue;\n}\n}\n}",
+            "loop(k, 0, 2) {\n#if FLAG\nfor (var i = 0; i < 2; i++) {\n#else\nif (true) {\n#endif\nbreak;\n}\n}",
         ):
             for mode in ("static-cpp", "static-cpp-literal"):
                 with (
                     self.subTest(text=text, mode=mode),
-                    self.assertRaisesRegex(WgslTemplateGenerateError, "break and continue are not supported"),
+                    self.assertRaisesRegex(WgslTemplateGenerateError, "cannot exit a template loop body"),
                 ):
-                    _gen("#use loop\n" + text + "\n", generator=mode)
+                    _gen("#use loop\n#param FLAG\n" + text + "\n", generator=mode)
 
     def test_declarations_after_nested_loop_closes(self) -> None:
         for mode in ("static-cpp", "static-cpp-literal"):
